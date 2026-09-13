@@ -46,6 +46,7 @@ STATE_ORDER = {"CLEAR": 0, "MONITOR": 1, "VERIFY": 2, "ALERT": 3}
 BANNER = {"CLEAR": "Clear", "MONITOR": "Monitoring behind you",
           "VERIFY": "Someone approaching from behind - check",
           "ALERT": "Rear alert. Stay aware."}
+DARK_ORANGE = (0, 90, 200)   # BGR - a deep orange, used when a hand is raised to the head
 
 
 def norm(x, lo, hi):
@@ -53,7 +54,7 @@ def norm(x, lo, hi):
 
 
 class Track:
-    def __init__(self):
+    def __init__(self, fps=25):
         self.h = deque(maxlen=30)        # box height history
         self.cx = deque(maxlen=30)       # box centre-x history
         self.dhat = deque(maxlen=30)     # distance proxy history
@@ -62,6 +63,8 @@ class Track:
         self.speed = deque(maxlen=10)    # closing-speed history (for acceleration)
         self.closing_speed = 0.0         # last closing speed (distance units / frame)
         self.accel = 0.0                 # last closing acceleration (per frame)
+        self.energy = deque(maxlen=int(15 * fps))   # motion energy, ~15 seconds
+        self.kp_prev = None              # keypoints from the previous frame
         self.score = 0.0
         self.state = "CLEAR"
         self.alert_frames = 0
@@ -73,7 +76,7 @@ class Scorer:
 
     def __init__(self, frame_w, frame_h, fps):
         self.W, self.H, self.fps = frame_w, frame_h, fps
-        self.tracks = defaultdict(Track)
+        self.tracks = defaultdict(lambda: Track(fps))
 
     def aggression(self, t, kp, kp_conf, box_h):
         """Rough aggression proxy from pose: raised arm + fast, jerky wrist motion.
@@ -125,6 +128,17 @@ class Scorer:
                 ttc = (t.h[-1] / growth) / self.fps
                 ttc_score = 1.0 - norm(ttc, 0.8, 6.0)
         aggr = self.aggression(t, kp, kp_conf, h)
+
+        # MOTION ENERGY: average joint movement since last frame, normalised by body size
+        if kp is not None:
+            if t.kp_prev is not None:
+                seen = (kp[:, 0] > 0) & (t.kp_prev[:, 0] > 0)      # joint detected in both frames
+                if kp_conf is not None:
+                    seen &= kp_conf > 0.3
+                if seen.any():
+                    disp = np.linalg.norm(kp[seen] - t.kp_prev[seen], axis=1)   # movement per joint
+                    t.energy.append(float(np.mean(disp)) / max(h, 1e-3))
+            t.kp_prev = kp.copy()
 
         # closing SPEED: how fast the distance proxy is shrinking (positive = approaching)
         closing_speed = 0.0
@@ -179,6 +193,38 @@ def draw_pose(img, kp, kp_conf, color, thickness=2):
             cv2.line(img, (int(pa[0]), int(pa[1])), (int(pb[0]), int(pb[1])), color, thickness)
 
 
+def hand_at_head(kp, kp_conf, margin=20):
+    """True if either wrist is raised to head (nose) level or above.
+    margin is in pixels below the nose that still counts as head level."""
+    if kp is None:
+        return False
+    def ok(i):
+        return kp_conf is None or kp_conf[i] > 0.3
+    nose_y = kp[0][1] if ok(0) and kp[0][1] > 0 else None
+    if nose_y is None:
+        return False
+    for wr in (L_WR, R_WR):          # 9, 10
+        if ok(wr) and kp[wr][1] > 0 and kp[wr][1] <= nose_y + margin:   # y grows downward
+            return True
+    return False
+
+
+def draw_energy_graph(img, series, x, y, w, h, color, label, s=1.0):
+    """Mini line graph of a track's motion energy, scaled 0..1 to its own peak."""
+    if len(series) < 2:
+        return
+    overlay = img.copy()
+    cv2.rectangle(overlay, (x, y), (x + w, y + h), (30, 30, 30), -1)
+    cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)            # translucent dark panel
+    cv2.rectangle(img, (x, y), (x + w, y + h), (90, 90, 90), max(1, int(s)))
+    vals = np.array(series)
+    vals = vals / (vals.max() + 1e-6)                          # scale 0..1
+    pts = [(x + int(i / (len(vals) - 1) * w), y + h - int(v * h)) for i, v in enumerate(vals)]
+    cv2.polylines(img, [np.array(pts, dtype=np.int32)], False, color, max(1, int(1.5 * s)), cv2.LINE_AA)
+    cv2.putText(img, label, (x, y - int(8 * s)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45 * s, color, max(1, int(s)), cv2.LINE_AA)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", default="0", help="video path or '0' for webcam")
@@ -219,6 +265,7 @@ def main():
                           tracker="bytetrack.yaml", verbose=False)[0]
 
         worst = ("CLEAR", 0.0)
+        focus_tid, focus_score = None, -1.0   # highest-scoring track -> shown in the energy graph
         boxes = res.boxes
         if boxes is not None and boxes.id is not None:
             xyxy = boxes.xyxy.cpu().numpy()
@@ -234,26 +281,42 @@ def main():
                 score, state = scorer.update(tid, bbox, kp, kc)
 
                 col = STATE_COLOR[state]
+                raised = hand_at_head(kp, kc, margin=int(20 * s))
+                if raised:
+                    col = DARK_ORANGE
                 x1, y1, x2, y2 = bbox.astype(int)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), col, th)
                 draw_pose(frame, kp, kc, col, th)
                 trk = scorer.tracks[tid]
                 # two label lines above the box, or just inside it when the box touches the top
-                ly = y1 - int(26 * s) if y1 > int(40 * s) else y1 + int(26 * s)
+                ly = y1 - int(26 * s) if y1 > int(60 * s) else y1 + int(26 * s)
                 cv2.putText(frame, f"ID{tid} {score:.2f} {state}", (x1 + th, ly),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55 * s, col, th, cv2.LINE_AA)
                 arrow = "UP" if trk.accel > 0 else "  "
                 cv2.putText(frame, f"closing {trk.closing_speed * fps:+.1f}  accel {trk.accel * fps:+.1f} {arrow}",
                             (x1 + th, ly + int(18 * s)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45 * s, col, th_small, cv2.LINE_AA)
+                if raised:   # third line: above the ID line, or below the closing line when inside the box
+                    hy = ly - int(22 * s) if y1 > int(60 * s) else ly + int(38 * s)
+                    cv2.putText(frame, "hand raised", (x1 + th, hy),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45 * s, DARK_ORANGE, th_small, cv2.LINE_AA)
 
                 prev = scorer.tracks[tid].__dict__.get("_prev", "CLEAR")
                 if state != prev:
                     log.append((frame_idx / fps, tid, prev, state))
                 scorer.tracks[tid]._prev = state
 
+                if score > focus_score:
+                    focus_tid, focus_score = tid, score
                 if STATE_ORDER[state] > STATE_ORDER[worst[0]]:
                     worst = (state, score)
+
+        # motion-energy mini graph (bottom-right, above the banner) for the highest-scoring track
+        if focus_tid is not None:
+            gw, gh, gm = int(260 * s), int(70 * s), int(16 * s)
+            draw_energy_graph(frame, scorer.tracks[focus_tid].energy,
+                              W - gw - gm, H - bar - gh - gm, gw, gh, (240, 240, 240),
+                              f"ID{focus_tid} motion energy (15s)", s)
 
         # bottom banner reflects the most urgent track
         bc = STATE_COLOR[worst[0]]
