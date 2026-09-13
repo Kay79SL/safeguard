@@ -76,6 +76,7 @@ class Track:
         self.accel = 0.0                 # last closing acceleration (per frame)
         self.energy = deque(maxlen=int(15 * fps))   # motion energy (body-heights/s), ~15 seconds
         self.kp_prev = None              # keypoints from the previous frame
+        self.sub = {}                    # latest sub-scores (the "why" behind the score)
         self.score = 0.0
         self.state = "CLEAR"
         self.alert_frames = 0
@@ -180,6 +181,12 @@ class Scorer:
                - self.W_DRIFT * drift)
         raw = float(np.clip(raw, 0.0, 1.0))
         t.score = 0.8 * t.score + 0.2 * raw          # temporal smoothing
+        t.sub = {                                    # the reasoning, exposed
+            "Approach":    max(proximity, ttc_score),
+            "Following":   max(persistence, centrality),
+            "Aggression":  aggr,
+            "Speeding up": accel_score,
+        }
 
         if t.score >= 0.72:
             t.alert_frames += 1
@@ -261,6 +268,30 @@ def draw_energy_graph(img, series, x, y, w, h, label, fps, s=1.0):
     color, name = energy_level(vals[-1])
     cv2.putText(img, f"{label}: {name}", (x + int(6 * s), y - int(8 * s)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45 * s, color, max(1, int(s)), cv2.LINE_AA)
+
+
+def draw_subscore_panel(img, sub, x, y, color, title="why (sub-scores)", s=1.0):
+    """Top-left panel: one bar per sub-score, explaining the blended score.
+    s scales everything (pass frame_height / 720 so it looks the same at any resolution)."""
+    k = 1.6 * s                                           # 1.6x the base size
+    k = min(k, 0.48 * img.shape[1] / 282)                 # but never wider than ~half the frame (portrait video)
+    name_w, bar_w, val_w = int(110 * k), int(110 * k), int(42 * k)
+    rowh, bar_h, pad = int(26 * k), int(12 * k), int(10 * k)
+    font, fs, ft = cv2.FONT_HERSHEY_SIMPLEX, 0.42 * k, max(1, int(k))
+    w = name_w + bar_w + val_w
+    overlay = img.copy()
+    cv2.rectangle(overlay, (x - pad, y - int(28 * k)), (x + w + pad, y + len(sub) * rowh + pad), (25, 25, 25), -1)
+    cv2.addWeighted(overlay, 0.75, img, 0.25, 0, img)     # translucent dark panel
+    cv2.putText(img, title, (x, y - int(10 * k)), font, fs, (200, 200, 200), ft, cv2.LINE_AA)
+    for i, (name, val) in enumerate(sub.items()):
+        yy = y + i * rowh
+        val = float(np.clip(val, 0.0, 1.0))
+        cv2.putText(img, name, (x, yy + bar_h), font, fs, (210, 210, 210), ft, cv2.LINE_AA)
+        bx = x + name_w
+        cv2.rectangle(img, (bx, yy + 1), (bx + bar_w, yy + bar_h), (60, 60, 60), -1)              # track
+        cv2.rectangle(img, (bx, yy + 1), (bx + int(bar_w * val), yy + bar_h), color, -1)          # fill
+        cv2.putText(img, f"{val:.2f}", (bx + bar_w + int(8 * k), yy + bar_h), font, fs * 0.95,
+                    (210, 210, 210), ft, cv2.LINE_AA)
 
 
 def main():
@@ -351,10 +382,16 @@ def main():
 
         # motion-energy mini graph (top-right) for the highest-scoring track
         if focus_tid is not None:
-            gw, gh, gm = int(260 * s), int(70 * s), int(16 * s)
+            gw, gh, gm = min(int(260 * s), int(0.44 * W)), int(70 * s), int(16 * s)   # <= ~half width
             draw_energy_graph(frame, scorer.tracks[focus_tid].energy,
                               W - gw - gm, gm + int(24 * s), gw, gh,
                               f"ID{focus_tid} motion (15s)", fps, s)
+
+        # "why" panel (top-left) for the same highest-scoring track
+        if focus_tid is not None:
+            ft_ = scorer.tracks[focus_tid]
+            draw_subscore_panel(frame, ft_.sub, int(30 * s), int(60 * s), STATE_COLOR[ft_.state],
+                                title=f"why ID{focus_tid} (sub-scores)", s=s)
 
         # bottom banner reflects the most urgent track
         bc = STATE_COLOR[worst[0]]
