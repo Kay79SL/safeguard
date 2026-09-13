@@ -200,7 +200,7 @@ def main():
     s = H / 720                          # 1.0 at 720p, 3.0 at 4K
     th = max(2, int(2 * s))              # line thickness
     th_small = max(1, int(1 * s))        # thin text thickness
-    bar = int(40 * s)                    # banner height
+    bar = int(60 * s)                    # banner height
 
     writer = None
     if not is_webcam:
@@ -258,8 +258,8 @@ def main():
         # bottom banner reflects the most urgent track
         bc = STATE_COLOR[worst[0]]
         cv2.rectangle(frame, (0, H - bar), (W, H), bc, -1)
-        cv2.putText(frame, BANNER[worst[0]], (int(12 * s), H - int(13 * s)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7 * s, (20, 20, 20), th, cv2.LINE_AA)
+        cv2.putText(frame, BANNER[worst[0]], (int(18 * s), H - int(20 * s)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.05 * s, (20, 20, 20), int(th * 1.5), cv2.LINE_AA)
 
         if writer is not None:
             writer.write(frame)
