@@ -213,15 +213,16 @@ def draw_energy_graph(img, series, x, y, w, h, color, label, s=1.0):
     """Mini line graph of a track's motion energy, scaled 0..1 to its own peak."""
     if len(series) < 2:
         return
+    top = y - int(24 * s)                                      # panel also covers the title
     overlay = img.copy()
-    cv2.rectangle(overlay, (x, y), (x + w, y + h), (30, 30, 30), -1)
+    cv2.rectangle(overlay, (x, top), (x + w, y + h), (30, 30, 30), -1)
     cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)            # translucent dark panel
-    cv2.rectangle(img, (x, y), (x + w, y + h), (90, 90, 90), max(1, int(s)))
+    cv2.rectangle(img, (x, top), (x + w, y + h), (90, 90, 90), max(1, int(s)))
     vals = np.array(series)
     vals = vals / (vals.max() + 1e-6)                          # scale 0..1
     pts = [(x + int(i / (len(vals) - 1) * w), y + h - int(v * h)) for i, v in enumerate(vals)]
     cv2.polylines(img, [np.array(pts, dtype=np.int32)], False, color, max(1, int(1.5 * s)), cv2.LINE_AA)
-    cv2.putText(img, label, (x, y - int(8 * s)),
+    cv2.putText(img, label, (x + int(6 * s), y - int(8 * s)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45 * s, color, max(1, int(s)), cv2.LINE_AA)
 
 
@@ -311,11 +312,11 @@ def main():
                 if STATE_ORDER[state] > STATE_ORDER[worst[0]]:
                     worst = (state, score)
 
-        # motion-energy mini graph (bottom-right, above the banner) for the highest-scoring track
+        # motion-energy mini graph (top-right) for the highest-scoring track
         if focus_tid is not None:
             gw, gh, gm = int(260 * s), int(70 * s), int(16 * s)
             draw_energy_graph(frame, scorer.tracks[focus_tid].energy,
-                              W - gw - gm, H - bar - gh - gm, gw, gh, (240, 240, 240),
+                              W - gw - gm, gm + int(24 * s), gw, gh, (240, 240, 240),
                               f"ID{focus_tid} motion energy (15s)", s)
 
         # bottom banner reflects the most urgent track
