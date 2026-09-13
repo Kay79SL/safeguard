@@ -153,7 +153,7 @@ def draw_pose(img, kp, kp_conf, color):
             continue
         pa, pb = kp[a], kp[b]
         if pa[0] > 0 and pb[0] > 0:
-            cv2.line(img, (int(pa[0]), int(pa[1])), (int(pb[0]), int(pb[1])), color, 2)
+            cv2.line(img, (int(pa[0]), int(pa[1])), (int(pb[0]), int(pb[1])), color, 6)
 
 
 def main():
