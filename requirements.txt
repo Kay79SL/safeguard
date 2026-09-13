@@ -1,0 +1,6 @@
+# live_rear_approach.py dependencies
+# (ultralytics pulls in PyTorch automatically - a large download, ~2 GB)
+ultralytics>=8.3.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+python-dotenv>=1.0.0

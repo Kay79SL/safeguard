@@ -1,0 +1,21 @@
+# live_rear_approach demo configuration
+# No API keys or secrets are required: the model weights download
+# automatically from the ultralytics GitHub release on first run.
+# These are just default settings the script can read.
+
+# Input: a video file path, or 0 for webcam
+SOURCE=sample.mp4
+
+# Output annotated video (ignored when SOURCE=0 / webcam)
+OUT=annotated.mp4
+
+# Pretrained weights (the pose model returns boxes + IDs + keypoints)
+WEIGHTS=yolov8n-pose.pt
+
+# Show a live preview window: true or false
+SHOW=false
+
+# Scoring band thresholds (0..1)
+MONITOR_THRESHOLD=0.34
+VERIFY_THRESHOLD=0.52
+ALERT_THRESHOLD=0.72
