@@ -59,6 +59,9 @@ class Track:
         self.dhat = deque(maxlen=30)     # distance proxy history
         self.closing = deque(maxlen=20)  # 1 if approaching this frame
         self.wr = deque(maxlen=8)        # wrist position history (for velocity/jerk)
+        self.speed = deque(maxlen=10)    # closing-speed history (for acceleration)
+        self.closing_speed = 0.0         # last closing speed (distance units / frame)
+        self.accel = 0.0                 # last closing acceleration (per frame)
         self.score = 0.0
         self.state = "CLEAR"
         self.alert_frames = 0
@@ -122,6 +125,23 @@ class Scorer:
                 ttc = (t.h[-1] / growth) / self.fps
                 ttc_score = 1.0 - norm(ttc, 0.8, 6.0)
         aggr = self.aggression(t, kp, kp_conf, h)
+
+        # closing SPEED: how fast the distance proxy is shrinking (positive = approaching)
+        closing_speed = 0.0
+        if len(t.dhat) >= 3:
+            closing_speed = (t.dhat[-3] - t.dhat[-1]) / 2.0   # drop in distance over 2 frames
+        t.speed.append(closing_speed)
+
+        # closing ACCELERATION: is that speed getting bigger? (positive = speeding up / lunge)
+        accel = 0.0
+        if len(t.speed) >= 5:
+            recent = np.mean(list(t.speed)[-2:])     # speed now
+            earlier = np.mean(list(t.speed)[-5:-3])  # speed a moment ago
+            accel = recent - earlier
+        t.closing_speed, t.accel = closing_speed, accel
+
+        speed_score = norm(closing_speed * self.fps, 0.5, 8.0)   # steady approach speed
+        accel_score = norm(accel * self.fps, 0.3, 5.0)           # SPEEDING UP -> high
         # benign crossing: only credited when off to the side AND not sustaining approach
         drift = 0.0
         if len(t.cx) >= 5 and centrality < 0.55 and persistence < 0.45:
@@ -129,7 +149,10 @@ class Scorer:
 
         raw = (self.W_PROX * proximity + self.W_PERSIST * persistence
                + self.W_CENTRAL * centrality + self.W_TTC * ttc_score
-               + self.W_AGGR * aggr - self.W_DRIFT * drift)
+               + self.W_AGGR * aggr
+               + 0.14 * speed_score          # NEW: fast approach
+               + 0.20 * accel_score          # NEW: speeding up (the lunge)
+               - self.W_DRIFT * drift)
         raw = float(np.clip(raw, 0.0, 1.0))
         t.score = 0.8 * t.score + 0.2 * raw          # temporal smoothing
 
@@ -145,7 +168,7 @@ class Scorer:
         return t.score, t.state
 
 
-def draw_pose(img, kp, kp_conf, color):
+def draw_pose(img, kp, kp_conf, color, thickness=2):
     if kp is None:
         return
     for a, b in SKELETON:
@@ -153,7 +176,7 @@ def draw_pose(img, kp, kp_conf, color):
             continue
         pa, pb = kp[a], kp[b]
         if pa[0] > 0 and pb[0] > 0:
-            cv2.line(img, (int(pa[0]), int(pa[1])), (int(pb[0]), int(pb[1])), color, 6)
+            cv2.line(img, (int(pa[0]), int(pa[1])), (int(pb[0]), int(pb[1])), color, thickness)
 
 
 def main():
@@ -174,6 +197,10 @@ def main():
     fps = cap.get(cv2.CAP_PROP_FPS) or 25
     W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
     H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
+    s = H / 720                          # 1.0 at 720p, 3.0 at 4K
+    th = max(2, int(2 * s))              # line thickness
+    th_small = max(1, int(1 * s))        # thin text thickness
+    bar = int(40 * s)                    # banner height
 
     writer = None
     if not is_webcam:
@@ -208,10 +235,17 @@ def main():
 
                 col = STATE_COLOR[state]
                 x1, y1, x2, y2 = bbox.astype(int)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), col, 2)
-                draw_pose(frame, kp, kc, col)
-                cv2.putText(frame, f"ID{tid} {score:.2f} {state}", (x1, max(y1 - 8, 14)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2, cv2.LINE_AA)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), col, th)
+                draw_pose(frame, kp, kc, col, th)
+                trk = scorer.tracks[tid]
+                # two label lines above the box, or just inside it when the box touches the top
+                ly = y1 - int(26 * s) if y1 > int(40 * s) else y1 + int(26 * s)
+                cv2.putText(frame, f"ID{tid} {score:.2f} {state}", (x1 + th, ly),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55 * s, col, th, cv2.LINE_AA)
+                arrow = "UP" if trk.accel > 0 else "  "
+                cv2.putText(frame, f"closing {trk.closing_speed * fps:+.1f}  accel {trk.accel * fps:+.1f} {arrow}",
+                            (x1 + th, ly + int(18 * s)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45 * s, col, th_small, cv2.LINE_AA)
 
                 prev = scorer.tracks[tid].__dict__.get("_prev", "CLEAR")
                 if state != prev:
@@ -223,9 +257,9 @@ def main():
 
         # bottom banner reflects the most urgent track
         bc = STATE_COLOR[worst[0]]
-        cv2.rectangle(frame, (0, H - 40), (W, H), bc, -1)
-        cv2.putText(frame, BANNER[worst[0]], (12, H - 13),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 20, 20), 2, cv2.LINE_AA)
+        cv2.rectangle(frame, (0, H - bar), (W, H), bc, -1)
+        cv2.putText(frame, BANNER[worst[0]], (int(12 * s), H - int(13 * s)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7 * s, (20, 20, 20), th, cv2.LINE_AA)
 
         if writer is not None:
             writer.write(frame)
