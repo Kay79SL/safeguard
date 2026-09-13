@@ -48,6 +48,17 @@ BANNER = {"CLEAR": "Clear", "MONITOR": "Monitoring behind you",
           "ALERT": "Rear alert. Stay aware."}
 DARK_ORANGE = (0, 90, 200)   # BGR - a deep orange, used when a hand is raised to the head
 
+# Motion-energy levels, in body-heights per second (smoothed over ~0.3 s).
+# Measured on the two sample videos: walking ~0.25 median, 90% below ~0.7.
+# The running level is an estimate - no running footage yet, tune it when you have some.
+ENERGY_MOVING = 0.5          # above this: fast movement / moving hands  -> orange
+ENERGY_RUNNING = 1.2         # above this: running                       -> red
+ENERGY_LEVELS = [            # (upper bound, colour BGR, name)
+    (ENERGY_MOVING, (90, 200, 90), "quiet"),
+    (ENERGY_RUNNING, (0, 140, 255), "moving"),
+    (float("inf"), (60, 60, 235), "running"),
+]
+
 
 def norm(x, lo, hi):
     return float(np.clip((x - lo) / (hi - lo + 1e-9), 0.0, 1.0))
@@ -63,7 +74,7 @@ class Track:
         self.speed = deque(maxlen=10)    # closing-speed history (for acceleration)
         self.closing_speed = 0.0         # last closing speed (distance units / frame)
         self.accel = 0.0                 # last closing acceleration (per frame)
-        self.energy = deque(maxlen=int(15 * fps))   # motion energy, ~15 seconds
+        self.energy = deque(maxlen=int(15 * fps))   # motion energy (body-heights/s), ~15 seconds
         self.kp_prev = None              # keypoints from the previous frame
         self.score = 0.0
         self.state = "CLEAR"
@@ -137,7 +148,7 @@ class Scorer:
                     seen &= kp_conf > 0.3
                 if seen.any():
                     disp = np.linalg.norm(kp[seen] - t.kp_prev[seen], axis=1)   # movement per joint
-                    t.energy.append(float(np.mean(disp)) / max(h, 1e-3))
+                    t.energy.append(float(np.mean(disp)) / max(h, 1e-3) * self.fps)   # body-heights / s
             t.kp_prev = kp.copy()
 
         # closing SPEED: how fast the distance proxy is shrinking (positive = approaching)
@@ -209,8 +220,15 @@ def hand_at_head(kp, kp_conf, margin=20):
     return False
 
 
-def draw_energy_graph(img, series, x, y, w, h, color, label, s=1.0):
-    """Mini line graph of a track's motion energy, scaled 0..1 to its own peak."""
+def energy_level(v):
+    """(colour, name) for a motion-energy value."""
+    for bound, color, name in ENERGY_LEVELS:
+        if v < bound:
+            return color, name
+
+
+def draw_energy_graph(img, series, x, y, w, h, label, fps, s=1.0):
+    """Mini line graph of a track's motion energy, coloured green / orange / red by level."""
     if len(series) < 2:
         return
     top = y - int(24 * s)                                      # panel also covers the title
@@ -218,11 +236,30 @@ def draw_energy_graph(img, series, x, y, w, h, color, label, s=1.0):
     cv2.rectangle(overlay, (x, top), (x + w, y + h), (30, 30, 30), -1)
     cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)            # translucent dark panel
     cv2.rectangle(img, (x, top), (x + w, y + h), (90, 90, 90), max(1, int(s)))
+
     vals = np.array(series)
-    vals = vals / (vals.max() + 1e-6)                          # scale 0..1
-    pts = [(x + int(i / (len(vals) - 1) * w), y + h - int(v * h)) for i, v in enumerate(vals)]
-    cv2.polylines(img, [np.array(pts, dtype=np.int32)], False, color, max(1, int(1.5 * s)), cv2.LINE_AA)
-    cv2.putText(img, label, (x + int(6 * s), y - int(8 * s)),
+    k = max(1, int(0.3 * fps))                                 # ~0.3 s smoothing, hides one-frame glitches
+    if len(vals) >= k:
+        vals = np.convolve(vals, np.ones(k) / k, mode="valid")
+    if len(vals) < 2:
+        return
+    y_max = max(ENERGY_RUNNING * 1.5, vals.max())              # fixed scale so colours line up with height
+    def py(v):
+        return y + h - int(min(v / y_max, 1.0) * h)
+
+    # faint dashed lines at the two thresholds
+    for level in (ENERGY_MOVING, ENERGY_RUNNING):
+        ly = py(level)
+        for dx in range(0, w, int(12 * s)):
+            cv2.line(img, (x + dx, ly), (x + min(dx + int(6 * s), w), ly), (110, 110, 110), max(1, int(s)))
+
+    pts = [(x + int(i / (len(vals) - 1) * w), py(v)) for i, v in enumerate(vals)]
+    lw = max(1, int(2 * s))
+    for (a, b), v in zip(zip(pts, pts[1:]), vals[1:]):
+        cv2.line(img, a, b, energy_level(v)[0], lw, cv2.LINE_AA)
+
+    color, name = energy_level(vals[-1])
+    cv2.putText(img, f"{label}: {name}", (x + int(6 * s), y - int(8 * s)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45 * s, color, max(1, int(s)), cv2.LINE_AA)
 
 
@@ -316,8 +353,8 @@ def main():
         if focus_tid is not None:
             gw, gh, gm = int(260 * s), int(70 * s), int(16 * s)
             draw_energy_graph(frame, scorer.tracks[focus_tid].energy,
-                              W - gw - gm, gm + int(24 * s), gw, gh, (240, 240, 240),
-                              f"ID{focus_tid} motion energy (15s)", s)
+                              W - gw - gm, gm + int(24 * s), gw, gh,
+                              f"ID{focus_tid} motion (15s)", fps, s)
 
         # bottom banner reflects the most urgent track
         bc = STATE_COLOR[worst[0]]
